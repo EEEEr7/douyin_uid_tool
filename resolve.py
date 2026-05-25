@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 
 from extract import (
     ExtractError,
@@ -13,13 +14,26 @@ from extract import (
 )
 
 
+def _resolve_cookie(cookie: str | None) -> str | None:
+    if cookie and cookie.strip():
+        return cookie.strip()
+    try:
+        from browser_cookies import get_douyin_cookie_bundle
+
+        header, _cd = get_douyin_cookie_bundle(None)
+        return header
+    except ExtractError:
+        return None
+
+
 def resolve_uid(url: str, cookie: str | None, *, http_only: bool = False) -> str:
     """Return UID string. Raises ExtractError on failure."""
     url = url.strip()
-    _final, _code, text = fetch_html(url, cookie)
+    cookie_header = _resolve_cookie(cookie)
+    _final, _code, text = fetch_html(url, cookie_header)
 
     if not http_only and is_likely_dynamic_shell(text):
-        return _resolve_uid_webengine(url, cookie)
+        return _resolve_uid_webengine(url, cookie_header)
 
     try:
         return extract_uid(text, page_url=url)
@@ -27,11 +41,17 @@ def resolve_uid(url: str, cookie: str | None, *, http_only: bool = False) -> str
         if http_only:
             raise
         if text and is_user_profile_url(url):
-            return _resolve_uid_webengine(url, cookie)
+            return _resolve_uid_webengine(url, cookie_header)
         raise
 
 
-def _resolve_uid_webengine(url: str, cookie: str | None, *, timeout_ms: int = 120_000) -> str:
+def _resolve_uid_webengine(
+    url: str,
+    cookie: str | None,
+    *,
+    timeout_ms: int = 120_000,
+    should_cancel: Callable[[], bool] | None = None,
+) -> str:
     try:
         from PySide6.QtCore import QEventLoop, Qt, QTimer, QUrl
         from PySide6.QtWidgets import QApplication
@@ -78,6 +98,9 @@ def _resolve_uid_webengine(url: str, cookie: str | None, *, timeout_ms: int = 12
         loop.quit()
 
     def try_extract() -> None:
+        if should_cancel and should_cancel():
+            finish_fail("已取消")
+            return
         if state["uid"] or state["err"]:
             return
         attempt[0] += 1
@@ -129,6 +152,14 @@ def _resolve_uid_webengine(url: str, cookie: str | None, *, timeout_ms: int = 12
     raise ExtractError("无界面解析未返回 UID")
 
 
-def resolve_uid_headless_browser(url: str, cookie: str | None = None, *, timeout_ms: int = 120_000) -> str:
+def resolve_uid_headless_browser(
+    url: str,
+    cookie: str | None = None,
+    *,
+    timeout_ms: int = 120_000,
+    should_cancel: Callable[[], bool] | None = None,
+) -> str:
     """Public alias used by GUI (main-thread headless WebEngine)."""
-    return _resolve_uid_webengine(url, cookie, timeout_ms=timeout_ms)
+    return _resolve_uid_webengine(
+        url, cookie, timeout_ms=timeout_ms, should_cancel=should_cancel
+    )

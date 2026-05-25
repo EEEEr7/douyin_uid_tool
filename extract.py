@@ -230,7 +230,15 @@ def extract_sec_uid_from_url(url: str | None) -> str | None:
     if not url:
         return None
     m = re.search(r"/user/([^/?#\s]+)", url, re.I)
-    return m.group(1).strip() if m else None
+    if not m:
+        return None
+    val = m.group(1).strip()
+    if not val or val.startswith("@"):
+        return None
+    # /user/84082679218 uses numeric uniqueId, not sec_uid.
+    if val.isdigit():
+        return None
+    return val
 
 
 def _user_blob(d: dict) -> dict:
@@ -259,7 +267,7 @@ def _profile_blob_matches(info: dict, sec_uid: str | None, unique_id: str | None
             if v and str(v) == sec_uid:
                 return True
     if unique_id:
-        for key in ("unique_id", "display_id"):
+        for key in ("unique_id", "uniqueId", "display_id"):
             v = info.get(key)
             if v and str(v).strip().lower() == unique_id.lower():
                 return True
@@ -298,6 +306,16 @@ SEC_UID_TO_UID_BARE_RE = re.compile(
     r'to_uid\\?"\s*:\s*(?P<to_uid>\d{5,})\b',
     re.I,
 )
+UNIQUE_ID_TO_UID_RE = re.compile(
+    r'uniqueId\\?"\s*:\s*\\?"(?P<sid>[^"\\]+)\\?"[\s\S]{0,4000}?'
+    r'to_uid\\?"\s*:\s*\\?"(?P<to_uid>\d{5,})\\?"',
+    re.I,
+)
+UNIQUE_ID_TO_UID_BARE_RE = re.compile(
+    r'uniqueId\\?"\s*:\s*\\?"(?P<sid>[^"\\]+)\\?"[\s\S]{0,4000}?'
+    r'toUid\\?"\s*:\s*\\?"(?P<to_uid>\d{5,})\\?"',
+    re.I,
+)
 UNIQUE_TO_UID_RE = re.compile(
     r'unique_id\\?"\s*:\s*\\?"(?P<sid>[^"\\]+)\\?"[\s\S]{0,4000}?'
     r'to_uid\\?"\s*:\s*\\?"(?P<to_uid>\d{5,})\\?"',
@@ -320,7 +338,12 @@ def _regex_owner_to_uid(
                     return m.group("to_uid")
     if unique_id:
         tl = unique_id.lower()
-        for rx in (UNIQUE_TO_UID_RE, UNIQUE_TO_UID_BARE_RE):
+        for rx in (
+            UNIQUE_ID_TO_UID_RE,
+            UNIQUE_ID_TO_UID_BARE_RE,
+            UNIQUE_TO_UID_RE,
+            UNIQUE_TO_UID_BARE_RE,
+        ):
             for m in rx.finditer(text):
                 if m.group("sid").lower() == tl:
                     return m.group("to_uid")
@@ -393,12 +416,8 @@ def extract_uid(
     if to_uid:
         return to_uid
 
-    if sec_uid or unique_id:
-        raise ExtractError(
-            "未在页面中定位到该主页所属用户的 to_uid。"
-            "请确认链接/抖音号正确，或页面需登录后再试。"
-        )
-
+    # Profile pages often embed to_uid without a sec_uid/unique_id pairing that
+    # matches our scoped regex — fall back to page-wide search before failing.
     to_uid = _first_regex_any(TO_UID_REGEXES, html_text)
     if to_uid:
         return to_uid
@@ -419,5 +438,14 @@ def extract_uid(
                 return parsed
         except (json.JSONDecodeError, TypeError):
             pass
+        to_uid3 = _first_regex_any(TO_UID_REGEXES, raw_block)
+        if to_uid3:
+            return to_uid3
+
+    if sec_uid or unique_id:
+        raise ExtractError(
+            "未在页面中定位到该主页所属用户的 to_uid。"
+            "请确认链接/抖音号正确，或页面需登录后再试。"
+        )
 
     raise ExtractError("未在页面中找到 to_uid（可能是动态加载页或页面结构已变更）。")

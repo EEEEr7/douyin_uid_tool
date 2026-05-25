@@ -22,7 +22,7 @@ def _run_cli(query: str, cookie: str | None, http_only: bool) -> int:
         else:
             from short_id_lookup import lookup_uid_by_short_id
 
-            uid = lookup_uid_by_short_id(q)
+            uid = lookup_uid_by_short_id(q, cookie)
         sys.stdout.write(uid + "\n")
         sys.stdout.flush()
         return 0
@@ -61,6 +61,16 @@ def main() -> None:
 
     if args.url and not args.gui:
         raise SystemExit(_run_cli(args.url, args.cookie, args.http_only))
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "DouyinUIDExtractor.DouyinUIDTool.1"
+            )
+        except (AttributeError, OSError):
+            pass
 
     from app import main as gui_main
 

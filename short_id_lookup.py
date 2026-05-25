@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
@@ -19,7 +20,19 @@ SEARCH_URLS = (
 
 PROFILE_OTHER_URL = "https://www.douyin.com/aweme/v1/web/user/profile/other/"
 
-# Plan set A + current set B
+IESDOUYIN_INFO_URL = "https://www.iesdouyin.com/web/api/v2/user/info/"
+
+# uniqueId (camelCase) near to_uid — numeric 抖音号 often uses this field name
+HTML_UNIQUE_ID_TO_UID_RE = re.compile(
+    r'uniqueId\\?"\s*:\s*\\?"(?P<sid>[^"\\]+)\\?"[^}]{0,1600}?'
+    r'to_uid\\?"\s*:\s*\\?"(?P<to_uid>\d{5,})\\?"',
+    re.DOTALL | re.I,
+)
+HTML_UNIQUE_ID_TO_UID_BARE_RE = re.compile(
+    r'uniqueId\\?"\s*:\s*\\?"(?P<sid>[^"\\]+)\\?"[^}]{0,1600}?'
+    r'toUid\\?"\s*:\s*\\?"(?P<to_uid>\d{5,})\\?"',
+    re.DOTALL | re.I,
+)
 PARAM_SETS: tuple[dict[str, str], ...] = (
     {
         "keyword": "",  # filled per request
@@ -74,13 +87,14 @@ def _search_page_url(keyword: str) -> str:
 
 
 def _profile_page_urls(unique_id: str) -> tuple[str, ...]:
-    """Douyin supports @unique_id profile URLs (most reliable for 抖音号 lookup)."""
+    """Douyin supports @unique_id and /user/{id} profile URLs."""
     safe = quote(unique_id, safe="")
-    return (
+    urls = (
         f"https://www.douyin.com/@{safe}",
         f"https://www.douyin.com/user/@{safe}",
         f"https://www.douyin.com/user/{safe}",
     )
+    return urls
 
 
 def _request_headers(cookie_header: str, referer: str) -> dict[str, str]:
@@ -99,8 +113,9 @@ def _fetch_page(
     cookie_dict: dict[str, str],
     *,
     accept_html: bool = False,
+    referer: str | None = None,
 ) -> tuple[str, int, str]:
-    headers = _request_headers(cookie_header, "https://www.douyin.com/")
+    headers = _request_headers(cookie_header, referer or "https://www.douyin.com/")
     if accept_html:
         headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     try:
@@ -126,6 +141,22 @@ def _enrich_params(base: dict[str, str], keyword: str, cookie_dict: dict[str, st
     return params
 
 
+def _pick_uid_from_user(user: dict) -> str | None:
+    """Short display uid from API (used when to_uid absent)."""
+    info = user.get("user_info") if isinstance(user.get("user_info"), dict) else user
+    if not isinstance(info, dict):
+        return None
+    for key in ("uid", "user_id", "userId"):
+        v = info.get(key)
+        if v is None or isinstance(v, bool):
+            continue
+        if isinstance(v, int):
+            return str(v)
+        if isinstance(v, str) and v.isdigit():
+            return v
+    return None
+
+
 def _pick_to_uid_from_user(user: dict) -> str | None:
     info = user.get("user_info") if isinstance(user.get("user_info"), dict) else user
     if not isinstance(info, dict):
@@ -142,6 +173,103 @@ def _pick_to_uid_from_user(user: dict) -> str | None:
     return None
 
 
+def _pick_sec_uid_from_user(user: dict) -> str | None:
+    info = user.get("user_info") if isinstance(user.get("user_info"), dict) else user
+    if not isinstance(info, dict):
+        return None
+    for key in ("sec_uid", "secUid"):
+        v = info.get(key)
+        if v and isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def _to_uid_via_sec_uid(
+    sec_uid: str,
+    cookie_header: str,
+    cookie_dict: dict[str, str],
+    *,
+    http_only: bool = False,
+) -> str | None:
+    """API often returns sec_uid without to_uid — load /user/{sec_uid} for to_uid."""
+    url = f"https://www.douyin.com/user/{sec_uid}"
+    try:
+        _final, code, text = _fetch_page(
+            url,
+            cookie_header,
+            cookie_dict,
+            accept_html=True,
+            referer=url,
+        )
+    except ExtractError:
+        return None
+    if code != 200:
+        return None
+    if not is_likely_dynamic_shell(text):
+        try:
+            return extract_uid(text, page_url=url)
+        except ExtractError:
+            pass
+    if http_only:
+        return None
+    try:
+        from resolve import resolve_uid_headless_browser
+
+        return resolve_uid_headless_browser(url, cookie_header, timeout_ms=75_000)
+    except ExtractError:
+        return None
+
+
+def _to_uid_via_unique_id(
+    unique_id: str,
+    cookie_header: str,
+    cookie_dict: dict[str, str],
+) -> str | None:
+    for url in _profile_page_urls(unique_id):
+        try:
+            _final, code, text = _fetch_page(
+                url,
+                cookie_header,
+                cookie_dict,
+                accept_html=True,
+                referer=f"https://www.douyin.com/@{unique_id}",
+            )
+        except ExtractError:
+            continue
+        if code != 200:
+            continue
+        if not is_likely_dynamic_shell(text):
+            try:
+                return extract_uid(text, unique_id=unique_id, page_url=url)
+            except ExtractError:
+                continue
+    return None
+
+
+def _resolve_to_uid_for_user(
+    user: dict,
+    cookie_header: str,
+    cookie_dict: dict[str, str],
+    *,
+    http_only: bool = False,
+) -> str | None:
+    to_uid = _pick_to_uid_from_user(user)
+    if to_uid:
+        return to_uid
+    sec = _pick_sec_uid_from_user(user)
+    if sec:
+        return _to_uid_via_sec_uid(
+            sec, cookie_header, cookie_dict, http_only=http_only
+        )
+    # API may return uid without to_uid — load @ profile for to_uid
+    if _pick_uid_from_user(user):
+        for sid in _short_id_candidates(user):
+            found = _to_uid_via_unique_id(sid, cookie_header, cookie_dict)
+            if found:
+                return found
+    return None
+
+
 def _short_id_candidates(user: dict) -> list[str]:
     out: list[str] = []
     sources: list[dict] = []
@@ -151,7 +279,7 @@ def _short_id_candidates(user: dict) -> list[str]:
         if isinstance(ui, dict):
             sources.append(ui)
     for src in sources:
-        for key in ("unique_id", "short_id", "display_id"):
+        for key in ("unique_id", "uniqueId", "short_id", "display_id"):
             v = src.get(key)
             if v is None:
                 continue
@@ -163,11 +291,29 @@ def _short_id_candidates(user: dict) -> list[str]:
 
 def _collect_user_lists(obj: Any, out: list[dict]) -> None:
     if isinstance(obj, dict):
-        ul = obj.get("user_list")
-        if isinstance(ul, list):
-            for item in ul:
-                if isinstance(item, dict):
-                    out.append(item)
+        for key in ("user_list", "users"):
+            ul = obj.get(key)
+            if isinstance(ul, list):
+                for item in ul:
+                    if isinstance(item, dict):
+                        out.append(item)
+        data = obj.get("data")
+        if isinstance(data, dict):
+            for key in ("user_list", "users"):
+                ul = data.get(key)
+                if isinstance(ul, list):
+                    for item in ul:
+                        if isinstance(item, dict):
+                            out.append(item)
+        elif isinstance(data, list):
+            for block in data:
+                if isinstance(block, dict):
+                    for key in ("user_list", "users"):
+                        ul = block.get(key)
+                        if isinstance(ul, list):
+                            for item in ul:
+                                if isinstance(item, dict):
+                                    out.append(item)
         for val in obj.values():
             _collect_user_lists(val, out)
     elif isinstance(obj, list):
@@ -175,26 +321,44 @@ def _collect_user_lists(obj: Any, out: list[dict]) -> None:
             _collect_user_lists(item, out)
 
 
-def _match_uid_in_list(user_list: list[dict], target: str) -> str | None:
+def _match_uid_in_list(
+    user_list: list[dict],
+    target: str,
+    cookie_header: str,
+    cookie_dict: dict[str, str],
+    *,
+    http_only: bool = False,
+) -> str | None:
     target_lower = target.lower()
     # Exact match
     for item in user_list:
         for sid in _short_id_candidates(item):
             if sid.lower() == target_lower:
-                uid = _pick_to_uid_from_user(item)
+                uid = _resolve_to_uid_for_user(
+                    item, cookie_header, cookie_dict, http_only=http_only
+                )
                 if uid:
                     return uid
     # Substring match (second pass)
     for item in user_list:
         for sid in _short_id_candidates(item):
             if target_lower in sid.lower() or sid.lower() in target_lower:
-                uid = _pick_to_uid_from_user(item)
+                uid = _resolve_to_uid_for_user(
+                    item, cookie_header, cookie_dict, http_only=http_only
+                )
                 if uid:
                     return uid
     return None
 
 
-def _parse_api_response(data: dict, target: str) -> str | None:
+def _parse_api_response(
+    data: dict,
+    target: str,
+    cookie_header: str,
+    cookie_dict: dict[str, str],
+    *,
+    http_only: bool = False,
+) -> str | None:
     status = data.get("status_code", data.get("status"))
     if status is not None and status != 0:
         msg = data.get("status_msg") or data.get("message") or "未知错误"
@@ -207,13 +371,17 @@ def _parse_api_response(data: dict, target: str) -> str | None:
     _collect_user_lists(data, user_list)
     if not user_list:
         return None
-    return _match_uid_in_list(user_list, target)
+    return _match_uid_in_list(
+        user_list, target, cookie_header, cookie_dict, http_only=http_only
+    )
 
 
 def _try_api_search(
     target: str,
     cookie_header: str,
     cookie_dict: dict[str, str],
+    *,
+    http_only: bool = False,
 ) -> str | None:
     referer = _search_page_url(target)
     headers = _request_headers(cookie_header, referer)
@@ -243,7 +411,9 @@ def _try_api_search(
             except json.JSONDecodeError:
                 continue
             try:
-                uid = _parse_api_response(data, target)
+                uid = _parse_api_response(
+                    data, target, cookie_header, cookie_dict, http_only=http_only
+                )
                 if uid:
                     return uid
             except ExtractError:
@@ -264,6 +434,8 @@ def _uid_from_html_blob(
         HTML_TO_UID_NEAR_UNIQUE_RE,
         HTML_TO_UID_NEAR_UNIQUE_ESC_RE,
         HTML_TO_UID_BEFORE_UNIQUE_RE,
+        HTML_UNIQUE_ID_TO_UID_RE,
+        HTML_UNIQUE_ID_TO_UID_BARE_RE,
     ):
         for m in rx.finditer(html):
             sid = m.group("sid")
@@ -275,7 +447,10 @@ def _uid_from_html_blob(
         f'"unique_id":"{target}"',
         f'"unique_id": "{target}"',
         f'"unique_id":"{target_lower}"',
+        f'"uniqueId":"{target}"',
+        f'"uniqueId": "{target}"',
         f'unique_id\\":\\"{target}\\"',
+        f'uniqueId\\":\\"{target}\\"',
     ):
         if pat.lower() in html.lower():
             try:
@@ -283,7 +458,7 @@ def _uid_from_html_blob(
             except ExtractError:
                 break
 
-    if profile_page:
+    if profile_page or (page_url and "/search/" in page_url):
         try:
             return extract_uid(html, unique_id=target, page_url=page_url)
         except ExtractError:
@@ -292,7 +467,14 @@ def _uid_from_html_blob(
     return None
 
 
-def _parse_profile_other_json(data: dict, target: str) -> str | None:
+def _parse_profile_other_json(
+    data: dict,
+    target: str,
+    cookie_header: str,
+    cookie_dict: dict[str, str],
+    *,
+    http_only: bool = False,
+) -> str | None:
     user = data.get("user")
     if not isinstance(user, dict):
         user = data.get("user_info") if isinstance(data.get("user_info"), dict) else None
@@ -300,9 +482,12 @@ def _parse_profile_other_json(data: dict, target: str) -> str | None:
         return None
     for sid in _short_id_candidates({"user_info": user}):
         if sid.lower() == target.lower():
-            uid = _pick_to_uid_from_user({"user_info": user})
-            if uid:
-                return uid
+            return _resolve_to_uid_for_user(
+                {"user_info": user},
+                cookie_header,
+                cookie_dict,
+                http_only=http_only,
+            )
     return None
 
 
@@ -310,6 +495,8 @@ def _try_profile_other_api(
     target: str,
     cookie_header: str,
     cookie_dict: dict[str, str],
+    *,
+    http_only: bool = False,
 ) -> str | None:
     params = {
         "unique_id": target,
@@ -339,7 +526,53 @@ def _try_profile_other_api(
     status = data.get("status_code", data.get("status"))
     if status is not None and status != 0:
         return None
-    return _parse_profile_other_json(data, target)
+    return _parse_profile_other_json(
+        data, target, cookie_header, cookie_dict, http_only=http_only
+    )
+
+
+def _try_iesdouyin_resolve(
+    target: str,
+    cookie_header: str,
+    cookie_dict: dict[str, str],
+    *,
+    http_only: bool = False,
+) -> str | None:
+    """Resolve numeric/custom 抖音号 via iesdouyin user info → sec_uid → profile to_uid."""
+    try:
+        resp = requests.get(
+            IESDOUYIN_INFO_URL,
+            params={"unique_id": target},
+            headers=_request_headers(
+                cookie_header, f"https://www.douyin.com/user/{target}"
+            ),
+            cookies=cookie_dict,
+            timeout=12,
+        )
+    except requests.exceptions.RequestException:
+        return None
+    if resp.status_code != 200:
+        return None
+    try:
+        data = resp.json()
+    except json.JSONDecodeError:
+        return None
+    status = data.get("status_code")
+    if status is not None and status != 0:
+        return None
+    user = data.get("user_info")
+    if not isinstance(user, dict):
+        return None
+    for key in ("to_uid", "toUid"):
+        v = user.get(key)
+        if v is not None and str(v).isdigit():
+            return str(v)
+    sec = user.get("sec_uid") or user.get("secUid")
+    if not sec or not isinstance(sec, str):
+        return None
+    return _to_uid_via_sec_uid(
+        sec.strip(), cookie_header, cookie_dict, http_only=http_only
+    )
 
 
 def _try_direct_profile_pages(
@@ -351,7 +584,11 @@ def _try_direct_profile_pages(
     for url in _profile_page_urls(target):
         try:
             final, code, text = _fetch_page(
-                url, cookie_header, cookie_dict, accept_html=True
+                url,
+                cookie_header,
+                cookie_dict,
+                accept_html=True,
+                referer=f"https://www.douyin.com/@{target}",
             )
         except ExtractError:
             continue
@@ -370,17 +607,31 @@ def _try_direct_profile_pages(
     return None
 
 
-def _try_headless_profile(target: str, cookie_header: str) -> str | None:
+def _try_headless_profile(
+    target: str,
+    cookie_header: str,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+) -> str | None:
     try:
         from resolve import resolve_uid_headless_browser
     except Exception:
         return None
     for url in _profile_page_urls(target):
+        if should_cancel and should_cancel():
+            raise ExtractError("已取消")
         try:
-            uid = resolve_uid_headless_browser(url, cookie_header, timeout_ms=75_000)
+            uid = resolve_uid_headless_browser(
+                url,
+                cookie_header,
+                timeout_ms=75_000,
+                should_cancel=should_cancel,
+            )
             if uid:
                 return uid
-        except ExtractError:
+        except ExtractError as e:
+            if str(e) == "已取消":
+                raise
             continue
     return None
 
@@ -391,21 +642,33 @@ def _try_html_fallback(
     cookie_dict: dict[str, str],
 ) -> str | None:
     url = _search_page_url(target)
+    referer = url
     try:
         _final, code, text = _fetch_page(
-            url, cookie_header, cookie_dict, accept_html=True
+            url,
+            cookie_header,
+            cookie_dict,
+            accept_html=True,
+            referer=referer,
         )
     except ExtractError:
         return None
     if code != 200:
         return None
+    if "login" in (_final or "").lower() or "passport" in (_final or "").lower():
+        raise ExtractError("Cookie 已过期，请用浏览器重新登录 douyin.com 后再试。")
     if is_likely_dynamic_shell(text):
         return None
 
     return _uid_from_html_blob(text, target, page_url=url)
 
 
-def _try_headless_fallback(target: str, cookie_header: str) -> str | None:
+def _try_headless_fallback(
+    target: str,
+    cookie_header: str,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+) -> str | None:
     """Load search page in headless WebEngine; match UID to target short_id."""
     try:
         import sys
@@ -449,6 +712,10 @@ def _try_headless_fallback(target: str, cookie_header: str) -> str | None:
         loop.quit()
 
     def try_extract() -> None:
+        if should_cancel and should_cancel():
+            state["err"] = "已取消"
+            loop.quit()
+            return
         if state["uid"]:
             return
         attempt[0] += 1
@@ -488,16 +755,36 @@ def _try_headless_fallback(target: str, cookie_header: str) -> str | None:
     if owns_app:
         app.processEvents()
 
+    if state.get("err") == "已取消":
+        raise ExtractError("已取消")
     return state["uid"]
 
 
-def lookup_uid_by_short_id(short_id: str) -> str:
-    """Look up numeric UID by Douyin short_id (抖音号)."""
-    target = _normalize_short_id(short_id)
-    cookie_header, cookie_dict = get_douyin_cookie_bundle()
+def _short_id_not_found_error(target: str) -> ExtractError:
+    return ExtractError(
+        f"未找到抖音号为「{target}」的用户。\n"
+        "请确认抖音号与 App 个人主页显示的完全一致（区分大小写）。\n"
+        "抖音号查询需本机浏览器已登录 douyin.com；也可在工具里粘贴 Cookie。\n"
+        "若浏览器能打开 https://www.douyin.com/@" + target
+        + " ，也可直接粘贴该主页完整链接查询（往往更稳）。"
+    )
 
-    # 1) @主页直达（最贴近浏览器里打开「抖音号」）
-    uid = _try_profile_other_api(target, cookie_header, cookie_dict)
+
+def _is_auth_extract_error(exc: ExtractError) -> bool:
+    msg = str(exc)
+    return any(k in msg for k in ("Cookie", "过期", "登录"))
+
+
+def lookup_uid_by_short_id_http(
+    short_id: str, manual_cookie: str | None = None
+) -> str:
+    """HTTP/API only — safe to call from a QThread worker."""
+    target = _normalize_short_id(short_id)
+    cookie_header, cookie_dict = get_douyin_cookie_bundle(manual_cookie)
+
+    uid = _try_iesdouyin_resolve(
+        target, cookie_header, cookie_dict, http_only=True
+    )
     if uid:
         return uid
 
@@ -505,12 +792,15 @@ def lookup_uid_by_short_id(short_id: str) -> str:
     if uid:
         return uid
 
-    uid = _try_headless_profile(target, cookie_header)
+    uid = _try_profile_other_api(
+        target, cookie_header, cookie_dict, http_only=True
+    )
     if uid:
         return uid
 
-    # 2) 搜索 API + 搜索页回退
-    uid = _try_api_search(target, cookie_header, cookie_dict)
+    uid = _try_api_search(
+        target, cookie_header, cookie_dict, http_only=True
+    )
     if uid:
         return uid
 
@@ -518,13 +808,41 @@ def lookup_uid_by_short_id(short_id: str) -> str:
     if uid:
         return uid
 
-    uid = _try_headless_fallback(target, cookie_header)
+    raise _short_id_not_found_error(target)
+
+
+def lookup_uid_by_short_id_headless(
+    short_id: str,
+    manual_cookie: str | None = None,
+    *,
+    should_cancel: Callable[[], bool] | None = None,
+) -> str:
+    """Headless WebEngine only — must run on the GUI main thread."""
+    if should_cancel and should_cancel():
+        raise ExtractError("已取消")
+    target = _normalize_short_id(short_id)
+    cookie_header, _cookie_dict = get_douyin_cookie_bundle(manual_cookie)
+
+    uid = _try_headless_profile(target, cookie_header, should_cancel=should_cancel)
+    if uid:
+        return uid
+    if should_cancel and should_cancel():
+        raise ExtractError("已取消")
+
+    uid = _try_headless_fallback(target, cookie_header, should_cancel=should_cancel)
     if uid:
         return uid
 
-    raise ExtractError(
-        f"未找到抖音号为「{target}」的用户。\n"
-        "请确认抖音号与 App 个人主页显示的完全一致（区分大小写）。\n"
-        "也可在浏览器打开 https://www.douyin.com/@" + target + " 能打开主页时，"
-        "关闭浏览器后在本工具重试；或直接粘贴该主页完整链接查询。"
-    )
+    raise _short_id_not_found_error(target)
+
+
+def lookup_uid_by_short_id(
+    short_id: str, manual_cookie: str | None = None
+) -> str:
+    """Look up numeric UID by Douyin short_id (抖音号). CLI: HTTP then headless."""
+    try:
+        return lookup_uid_by_short_id_http(short_id, manual_cookie)
+    except ExtractError as e:
+        if _is_auth_extract_error(e):
+            raise
+    return lookup_uid_by_short_id_headless(short_id, manual_cookie)

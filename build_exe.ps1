@@ -21,9 +21,20 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 & $venvPython -m pip install -r "requirements.txt"
 & $venvPython -m pip install -r "requirements-dev.txt"
 
+$iconPng = Join-Path $PSScriptRoot "app_icon.png"
+$iconIco = Join-Path $PSScriptRoot "app_icon.ico"
+if (Test-Path -LiteralPath $iconPng) {
+  & $venvPython (Join-Path $PSScriptRoot "generate_app_icon.py")
+}
+
 if (Test-Path -LiteralPath "dist") { Remove-Item -Recurse -Force "dist" }
 if (Test-Path -LiteralPath "build") { Remove-Item -Recurse -Force "build" }
 if (Test-Path -LiteralPath "DouyinUIDExtractor.spec") { Remove-Item -Force "DouyinUIDExtractor.spec" }
+
+$iconArg = @()
+if (Test-Path -LiteralPath $iconIco) {
+  $iconArg = @("--icon", $iconIco, "--add-data", "$iconIco;.")
+}
 
 & $venvPython -m PyInstaller `
   --noconfirm `
@@ -35,6 +46,7 @@ if (Test-Path -LiteralPath "DouyinUIDExtractor.spec") { Remove-Item -Force "Douy
   --hidden-import lz4 `
   --collect-submodules browser_cookie3 `
   --name "DouyinUIDExtractor" `
+  @iconArg `
   "main.py"
 
 Write-Host ""
