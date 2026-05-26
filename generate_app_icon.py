@@ -1,4 +1,4 @@
-"""Build a full-bleed square app_icon.ico for Windows desktop shortcuts."""
+"""Build square app_icon.ico with solid white background (no transparency)."""
 
 from __future__ import annotations
 
@@ -7,66 +7,42 @@ from pathlib import Path
 
 from PIL import Image
 
-
-def _luminance(r: int, g: int, b: int) -> float:
-    return 0.299 * r + 0.587 * g + 0.114 * b
-
-
-def _collect_wool_pixels(rgba: Image.Image) -> tuple[list[int], list[int]]:
-    px = rgba.load()
-    w, h = rgba.size
-    xs: list[int] = []
-    ys: list[int] = []
-    for y in range(h):
-        for x in range(w):
-            r, g, b, a = px[x, y]
-            if a < 20:
-                continue
-            if r >= 212 and g >= 212 and b >= 212:
-                xs.append(x)
-                ys.append(y)
-    if len(xs) < 40:
-        xs.clear()
-        ys.clear()
-        for y in range(h):
-            for x in range(w):
-                r, g, b, a = px[x, y]
-                if a >= 20 and _luminance(r, g, b) >= 95:
-                    xs.append(x)
-                    ys.append(y)
-    return xs, ys
+WHITE = (255, 255, 255)
+ICON_SIZE = 256
+MARGIN_RATIO = 0.10
 
 
-def _crop_subject(source: Image.Image) -> Image.Image:
-    rgba = source.convert("RGBA")
-    xs, ys = _collect_wool_pixels(rgba)
-    if not xs:
-        return rgba.crop(_alpha_bbox(rgba))
-    pad = 2
-    min_x = max(0, min(xs) - pad)
-    min_y = max(0, min(ys) - pad)
-    max_x = min(rgba.width - 1, max(xs) + pad)
-    max_y = min(rgba.height - 1, max(ys) + pad)
-    return rgba.crop((min_x, min_y, max_x + 1, max_y + 1))
+def _source_path(root: Path) -> Path | None:
+    for name in ("app_icon.png", "xteink_logo.png"):
+        path = root / name
+        if path.is_file():
+            return path
+    return None
 
 
-def _alpha_bbox(rgba: Image.Image, pad: int = 2) -> tuple[int, int, int, int]:
-    px = rgba.load()
-    w, h = rgba.size
+def _flatten_on_white(img: Image.Image) -> Image.Image:
+    """Composite RGBA onto opaque white — removes transparent background."""
+    rgba = img.convert("RGBA")
+    base = Image.new("RGB", rgba.size, WHITE)
+    base.paste(rgba, mask=rgba.split()[3])
+    return base
+
+
+def _content_bbox(rgb: Image.Image, pad: int = 6, white_threshold: int = 248) -> tuple[int, int, int, int]:
+    px = rgb.load()
+    w, h = rgb.size
     min_x, min_y = w, h
     max_x, max_y = 0, 0
     for y in range(h):
         for x in range(w):
-            if px[x, y][3] >= 16:
+            r, g, b = px[x, y]
+            if r < white_threshold or g < white_threshold or b < white_threshold:
                 min_x = min(min_x, x)
                 min_y = min(min_y, y)
                 max_x = max(max_x, x)
                 max_y = max(max_y, y)
     if max_x < min_x:
-        side = min(w, h)
-        left = (w - side) // 2
-        top = (h - side) // 2
-        return left, top, left + side, top + side
+        return 0, 0, w, h
     min_x = max(0, min_x - pad)
     min_y = max(0, min_y - pad)
     max_x = min(w - 1, max_x + pad)
@@ -74,21 +50,24 @@ def _alpha_bbox(rgba: Image.Image, pad: int = 2) -> tuple[int, int, int, int]:
     return min_x, min_y, max_x + 1, max_y + 1
 
 
-def _square_fill(subject: Image.Image, size: int = 256, bg: tuple[int, int, int] = (255, 255, 255)) -> Image.Image:
-    rgba = subject.convert("RGBA")
-    sw, sh = rgba.size
-    side = max(sw, sh)
-    square = Image.new("RGBA", (side, side), (*bg, 255))
-    ox = (side - sw) // 2
-    oy = (side - sh) // 2
-    square.paste(rgba, (ox, oy), rgba)
-    square = square.resize((size, size), Image.Resampling.LANCZOS)
-    return square.convert("RGB")
+def _square_white_icon(rgb: Image.Image, size: int = ICON_SIZE) -> Image.Image:
+    cropped = rgb.crop(_content_bbox(rgb))
+    cw, ch = cropped.size
+    inner = max(cw, ch)
+    side = max(1, int(round(inner / (1 - 2 * MARGIN_RATIO))))
+    square = Image.new("RGB", (side, side), WHITE)
+    ox = (side - cw) // 2
+    oy = (side - ch) // 2
+    square.paste(cropped, (ox, oy))
+    return square.resize((size, size), Image.Resampling.LANCZOS)
 
 
 def _save_windows_ico(square_rgb: Image.Image, ico_path: Path) -> None:
     sizes = [256, 128, 64, 48, 32, 16]
-    frames = [square_rgb.resize((s, s), Image.Resampling.LANCZOS) for s in sizes]
+    frames = [
+        square_rgb.resize((s, s), Image.Resampling.LANCZOS).convert("RGB")
+        for s in sizes
+    ]
     frames[0].save(
         ico_path,
         format="ICO",
@@ -99,18 +78,19 @@ def _save_windows_ico(square_rgb: Image.Image, ico_path: Path) -> None:
 
 def main() -> int:
     root = Path(__file__).resolve().parent
-    png_path = root / "app_icon.png"
-    ico_path = root / "app_icon.ico"
-    preview_path = root / "app_icon_preview.png"
-    if not png_path.is_file():
-        print(f"Missing {png_path}", file=sys.stderr)
+    src = _source_path(root)
+    if src is None:
+        print("Missing app_icon.png or xteink_logo.png", file=sys.stderr)
         return 1
 
-    subject = _crop_subject(Image.open(png_path))
-    square = _square_fill(subject, 256)
+    ico_path = root / "app_icon.ico"
+    preview_path = root / "app_icon_preview.png"
+
+    flat = _flatten_on_white(Image.open(src))
+    square = _square_white_icon(flat, ICON_SIZE)
     square.save(preview_path, format="PNG")
     _save_windows_ico(square, ico_path)
-    print(f"Wrote {ico_path} (subject {subject.size[0]}x{subject.size[1]}, wool crop, full-bleed RGB)")
+    print(f"Wrote {ico_path} from {src.name} (solid white background, RGB, no alpha)")
     return 0
 
 

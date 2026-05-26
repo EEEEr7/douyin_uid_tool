@@ -20,9 +20,15 @@ def _run_cli(query: str, cookie: str | None, http_only: bool) -> int:
         if _is_profile_url(q):
             uid = resolve_uid(q, cookie, http_only=http_only)
         else:
-            from short_id_lookup import lookup_uid_by_short_id
+            from short_id_lookup import (
+                lookup_uid_by_short_id,
+                lookup_uid_by_short_id_http,
+            )
 
-            uid = lookup_uid_by_short_id(q, cookie)
+            if http_only:
+                uid = lookup_uid_by_short_id_http(q, cookie)
+            else:
+                uid = lookup_uid_by_short_id(q, cookie)
         sys.stdout.write(uid + "\n")
         sys.stdout.flush()
         return 0
@@ -33,7 +39,7 @@ def _run_cli(query: str, cookie: str | None, http_only: bool) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="抖音号或主页 URL → 数字 UID（默认打开窗口；传入参数则无界面输出 UID）"
+        description="XTeink · 抖音UID采集：抖音号或主页 URL → 数字 UID（默认打开窗口）"
     )
     parser.add_argument(
         "url",
@@ -67,7 +73,7 @@ def main() -> None:
             import ctypes
 
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                "DouyinUIDExtractor.DouyinUIDTool.1"
+                "XTeink.DouyinUIDTool.1"
             )
         except (AttributeError, OSError):
             pass

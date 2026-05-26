@@ -1,5 +1,5 @@
 # Shared Windows shell integration for desktop shortcuts.
-$script:AppUserModelId = "DouyinUIDExtractor.DouyinUIDTool.1"
+$script:AppUserModelId = "XTeink.DouyinUIDTool.1"
 
 function Set-ShortcutAppUserModelId {
     param(

@@ -10,9 +10,14 @@ build/
 dist/
 *.spec
 
-# Packaged binary (rebuild with build_exe.ps1)
-DouyinUIDExtractor.exe
+# Packaged binaries (rebuild with build_exe.ps1)
+*.exe
 *.zip
+release/
+
+.cursor/
+_tmp_*.png
+app_brand.png
 
 .env
 .env.*

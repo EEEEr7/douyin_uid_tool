@@ -1,7 +1,4 @@
-"""PySide6 GUI: Douyin profile URL → numeric UID (minimal layout).
-
-Fast path uses HTTP; dynamic pages fall back to headless Qt WebEngine on the GUI thread.
-"""
+"""PySide6 GUI: XTeink — Douyin profile URL → numeric UID."""
 
 from __future__ import annotations
 
@@ -10,7 +7,7 @@ from functools import partial
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QClipboard, QFont, QFontDatabase, QIcon
+from PySide6.QtGui import QClipboard, QFont, QFontDatabase, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -33,17 +30,21 @@ from extract import (
     is_user_profile_url,
 )
 
+APP_NAME = "XTeink 抖音UID采集"
+APP_FOOTER = "© 2026 阅星曈 v1.2.0"
+APP_USER_MODEL_ID = "XTeink.DouyinUIDTool.1"
 
-# Rose palette (UI UX Pro Max); layout kept minimal
-DS_PRIMARY = "#E11D48"
-DS_SECONDARY = "#FB7185"
-DS_CTA = "#2563EB"
-DS_BG = "#FFF1F2"
-DS_TEXT = "#881337"
-DS_TEXT_MUTED = "#9F1239"
+# XTeink brand palette (black / white / orange accent)
+DS_PRIMARY = "#171717"
+DS_ACCENT = "#FF6600"
+DS_ACCENT_HOVER = "#E55A00"
+DS_BG = "#FAFAFA"
+DS_TEXT = "#171717"
+DS_TEXT_MUTED = "#525252"
 DS_CARD = "#FFFFFF"
-DS_BORDER = "#FECDD3"
-DS_RESULT_BG = "#FFF5F5"
+DS_BORDER = "#E5E5E5"
+DS_RESULT_BG = "#F5F5F5"
+DS_FOOTER = "#737373"
 
 APP_STYLE = f"""
 QMainWindow {{
@@ -51,13 +52,14 @@ QMainWindow {{
 }}
 QWidget#card {{
     background-color: {DS_CARD};
-    border-radius: 12px;
+    border-radius: 14px;
     border: 1px solid {DS_BORDER};
 }}
-QLabel#title {{
-    font-size: 20px;
-    font-weight: 700;
-    color: {DS_TEXT};
+QLabel#brandTagline {{
+    font-size: 13px;
+    font-weight: 600;
+    color: {DS_PRIMARY};
+    letter-spacing: 0.2px;
 }}
 QLabel#subtitle {{
     font-size: 12px;
@@ -65,68 +67,74 @@ QLabel#subtitle {{
 }}
 QLabel#sectionLabel {{
     font-size: 12px;
+    font-weight: 600;
     color: {DS_TEXT_MUTED};
+    letter-spacing: 0.4px;
 }}
 QLabel#hint {{
     font-size: 12px;
     color: {DS_TEXT_MUTED};
-    margin-top: 6px;
+    margin-top: 4px;
 }}
 QLabel#hint[status="loading"] {{
-    color: {DS_CTA};
+    color: {DS_ACCENT};
 }}
 QLabel#hint[status="ok"] {{
-    color: #047857;
+    color: #15803D;
 }}
 QLabel#hint[status="err"] {{
-    color: #B91C1C;
+    color: #DC2626;
+}}
+QLabel#footer {{
+    font-size: 11px;
+    color: {DS_FOOTER};
 }}
 QLineEdit {{
-    padding: 10px 12px;
+    padding: 11px 14px;
     border: 1px solid {DS_BORDER};
-    border-radius: 8px;
+    border-radius: 10px;
     font-size: 13px;
     background: {DS_RESULT_BG};
     color: {DS_TEXT};
-    selection-background-color: {DS_SECONDARY};
+    selection-background-color: {DS_ACCENT};
 }}
 QLineEdit:focus {{
-    border-color: {DS_PRIMARY};
+    border-color: {DS_ACCENT};
     background: #FFFFFF;
 }}
 QPushButton#primary {{
-    background-color: {DS_PRIMARY};
+    background-color: {DS_ACCENT};
     color: #FFFFFF;
     border: none;
-    border-radius: 8px;
-    padding: 9px 22px;
+    border-radius: 10px;
+    padding: 10px 24px;
     font-size: 13px;
     font-weight: 600;
 }}
-QPushButton#primary:hover {{ background-color: #BE123C; }}
-QPushButton#primary:disabled {{ background-color: #FDA4AF; }}
+QPushButton#primary:hover {{ background-color: {DS_ACCENT_HOVER}; }}
+QPushButton#primary:disabled {{ background-color: #FFB380; color: #FFFFFF; }}
 QPushButton#secondary {{
     background-color: #FFFFFF;
     color: {DS_TEXT};
     border: 1px solid {DS_BORDER};
-    border-radius: 8px;
-    padding: 9px 18px;
+    border-radius: 10px;
+    padding: 10px 18px;
     font-size: 13px;
 }}
 QPushButton#secondary:hover {{
-    border-color: {DS_SECONDARY};
-    background-color: #FFF5F5;
+    border-color: {DS_ACCENT};
+    background-color: #FFF7ED;
 }}
-QPushButton#secondary:disabled {{ color: #FDA4AF; }}
+QPushButton#secondary:disabled {{ color: #A3A3A3; border-color: {DS_BORDER}; }}
 QTextEdit#resultBox {{
     border: 1px solid {DS_BORDER};
-    border-radius: 8px;
+    border-radius: 10px;
     padding: 12px 14px;
     background-color: {DS_RESULT_BG};
     font-size: 18px;
     font-weight: 600;
     color: {DS_TEXT};
-    selection-background-color: {DS_PRIMARY};
+    selection-background-color: {DS_ACCENT};
 }}
 """
 
@@ -148,7 +156,7 @@ def _pick_font(
 
 
 def _apply_typography(app: QApplication, window: QMainWindow) -> None:
-    body_font = _pick_font(("Segoe UI", "Microsoft YaHei UI"), 13)
+    body_font = _pick_font(("Segoe UI", "Inter", "Microsoft YaHei UI"), 13)
     mono_font = _pick_font(
         ("Consolas", "Cascadia Mono", "JetBrains Mono"),
         18,
@@ -164,7 +172,26 @@ def _is_profile_url(text: str) -> bool:
     return t.startswith("http://") or t.startswith("https://")
 
 
-APP_USER_MODEL_ID = "DouyinUIDExtractor.DouyinUIDTool.1"
+def _resource_base() -> Path:
+    return Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+
+
+def _brand_logo_path() -> Path:
+    base = _resource_base()
+    for name in ("xteink_logo.png", "app_icon.png"):
+        path = base / name
+        if path.is_file():
+            return path
+    return base / "xteink_logo.png"
+
+
+def _app_icon_path() -> Path:
+    base = _resource_base()
+    for name in ("app_icon.ico", "app_icon.png", "xteink_logo.png"):
+        path = base / name
+        if path.is_file():
+            return path
+    return base / "app_icon.ico"
 
 
 def _init_windows_app_user_model_id() -> None:
@@ -199,15 +226,6 @@ def _apply_windows_hwnd_icon(window: QMainWindow, icon_path: Path) -> None:
                 send(hwnd, wm_seticon, 0 if size <= 32 else 1, handle)
     except (AttributeError, OSError, ValueError):
         pass
-
-
-def _app_icon_path() -> Path:
-    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
-    for name in ("app_icon.ico", "app_icon.png"):
-        path = base / name
-        if path.is_file():
-            return path
-    return base / "app_icon.ico"
 
 
 def _apply_app_icon(app: QApplication, window: QMainWindow | None = None) -> None:
@@ -281,9 +299,9 @@ class Worker(QObject):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("抖音 UID 提取")
-        self.setMinimumSize(640, 400)
-        self.resize(760, 480)
+        self.setWindowTitle(APP_NAME)
+        self.setMinimumSize(660, 460)
+        self.resize(780, 520)
 
         self._thread: QThread | None = None
         self._worker: Worker | None = None
@@ -298,22 +316,45 @@ class MainWindow(QMainWindow):
         shell = QWidget(self)
         self.setCentralWidget(shell)
         outer = QVBoxLayout(shell)
-        outer.setContentsMargins(24, 24, 24, 24)
-        outer.setSpacing(0)
+        outer.setContentsMargins(28, 28, 28, 20)
+        outer.setSpacing(16)
 
         card = QWidget()
         card.setObjectName("card")
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(22, 20, 22, 20)
-        card_layout.setSpacing(12)
+        card_layout.setContentsMargins(26, 22, 26, 22)
+        card_layout.setSpacing(14)
 
-        self.title_label = QLabel("抖音 UID 提取")
-        self.title_label.setObjectName("title")
+        header = QHBoxLayout()
+        header.setSpacing(14)
+        logo_path = _brand_logo_path()
+        if logo_path.is_file():
+            logo_label = QLabel()
+            logo_label.setPixmap(
+                QPixmap(str(logo_path)).scaledToHeight(
+                    40, Qt.TransformationMode.SmoothTransformation
+                )
+            )
+            logo_label.setFixedHeight(44)
+            header.addWidget(logo_label, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_col = QVBoxLayout()
+        header_col.setSpacing(2)
+        self.tagline_label = QLabel("抖音UID采集")
+        self.tagline_label.setObjectName("brandTagline")
         self.sub_label = QLabel(
             "输入抖音号或主页链接。查抖音号需已登录 douyin.com；失败时可粘贴主页链接。"
         )
         self.sub_label.setObjectName("subtitle")
         self.sub_label.setWordWrap(True)
+        header_col.addWidget(self.tagline_label)
+        header_col.addWidget(self.sub_label)
+        header.addLayout(header_col, 1)
+        card_layout.addLayout(header)
+
+        divider = QWidget()
+        divider.setFixedHeight(1)
+        divider.setStyleSheet(f"background-color: {DS_BORDER};")
+        card_layout.addWidget(divider)
 
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("抖音号或主页链接 https://www.douyin.com/user/...")
@@ -334,14 +375,14 @@ class MainWindow(QMainWindow):
         row.addWidget(self.copy_btn)
         row.addStretch()
 
-        self.result_label = QLabel("to_uid")
+        self.result_label = QLabel("UID 结果")
         self.result_label.setObjectName("sectionLabel")
 
         self.result_box = QTextEdit()
         self.result_box.setObjectName("resultBox")
         self.result_box.setReadOnly(True)
         self.result_box.setPlaceholderText("查询成功后在此显示")
-        self.result_box.setMinimumHeight(100)
+        self.result_box.setMinimumHeight(104)
         self.result_box.setMaximumHeight(200)
         self.result_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -350,8 +391,6 @@ class MainWindow(QMainWindow):
         self.hint_label.setWordWrap(True)
         self.hint_label.setMinimumHeight(22)
 
-        card_layout.addWidget(self.title_label)
-        card_layout.addWidget(self.sub_label)
         card_layout.addWidget(self.url_edit)
         card_layout.addLayout(row)
         card_layout.addWidget(self.result_label)
@@ -360,6 +399,13 @@ class MainWindow(QMainWindow):
 
         outer.addWidget(card)
         outer.addStretch()
+
+        footer = QHBoxLayout()
+        footer.addStretch()
+        footer_label = QLabel(APP_FOOTER)
+        footer_label.setObjectName("footer")
+        footer.addWidget(footer_label)
+        outer.addLayout(footer)
 
         shell.setStyleSheet(APP_STYLE)
 
